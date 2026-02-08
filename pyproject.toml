@@ -1,10 +1,18 @@
 [project]
 name = "parsermouth"
-version = "0.1.0"
+version = "0.2.0"
 description = "A LAMMPS output data to csv parser"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-    "ibis>=3.3.0",
     "pandas>=3.0.0",
+]
+
+[dependency-groups]
+dev = [
+    "ipython>=9.10.0",
+    "marimo>=0.19.7",
+    "pytest>=9.0.2",
+    "ruff>=0.15.0",
+    "scalene>=2.1.3",
 ]
