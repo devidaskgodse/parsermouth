@@ -1,6 +1,6 @@
 [project]
 name = "parsermouth"
-version = "0.2.0"
+version = "0.1.0"
 description = "A LAMMPS output data to csv parser"
 readme = "README.md"
 requires-python = ">=3.13"
