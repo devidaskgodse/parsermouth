@@ -84,38 +84,65 @@ def read_chunk_general(filename_or_fileobj, is_binary=False):
     with open_input(filename_or_fileobj, mode=mode) as f:
         raw_data = f.read()
 
-    # If the data is bytes, decode it to a string first
-    if isinstance(raw_data, bytes):
-        content = raw_data.decode('utf-8')
-    else:
-        content = raw_data
+    content = raw_data.decode('utf-8') if isinstance(raw_data, bytes) else raw_data
+    lines = [l.strip() for l in content.splitlines() if l.strip() != ""]
 
-    lines = content.splitlines()
+    # ---- Extract headers ONCE ----
+    header_line = None
+    for l in lines:
+        if l.startswith("# Chunk "):
+            header_line = l
+            break
 
-    # extract the timestamp from line 4 (index 3)
-    end_timestamp = lines[3].split()[0]
+    if header_line is None:
+        raise ValueError("Could not find header line")
 
-    # extract headers from line 3 after the "# " (index 2)
-    raw_headers = lines[2].split()[1:]
-
-    # clean the headers: remove "c_", "v_", "[" and "]"
+    raw_headers = header_line.split()[1:]
     cleaned_headers = [re.sub(r"c_|v_|\[|\]", "", h) for h in raw_headers]
 
     final_headers = ["timestep"] + cleaned_headers
 
-    # parse data rows
+    all_dfs = []
+    i = 0
+    n_lines = len(lines)
 
-    # join the lines (from index 4 onwards) into one large string
-    data_body = "\n".join(lines[4:])
+    while i < n_lines:
 
-    # read the data using a whitespace separator
-    # sep=r'\s+' handles any number of spaces or tabs
-    df = pd.read_csv(StringIO(data_body), sep=r'\s+', names=final_headers[1:])
+        line = lines[i]
 
-    # insert the timestamp as the first column
-    df.insert(0, final_headers[0], pd.to_numeric(end_timestamp))
+        # skip comments
+        if line.startswith("#"):
+            i += 1
+            continue
 
-    return df
+        parts = line.split()
+
+        # ---- detect timestep line ----
+        if len(parts) >= 2 and parts[0].isdigit():
+            timestep = int(parts[0])
+            n_chunks = int(parts[1])
+
+            # ---- read chunk rows ----
+            data_start = i + 1
+            data_end = data_start + n_chunks
+
+            data_body = "\n".join(lines[data_start:data_end])
+
+            df = pd.read_csv(
+                StringIO(data_body),
+                sep=r"\s+",
+                names=final_headers[1:]
+            )
+
+            df.insert(0, "timestep", timestep)
+
+            all_dfs.append(df)
+
+            i = data_end
+        else:
+            i += 1
+
+    return pd.concat(all_dfs, ignore_index=True)
 
 def parse_chunk(filename):
     warnings.warn(
