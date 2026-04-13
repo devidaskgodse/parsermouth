@@ -1,6 +1,6 @@
 [project]
 name = "parsermouth"
-version = "0.2.1"
+version = "1.0.0"
 description = "A LAMMPS output data to dataframe parser"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -10,8 +10,6 @@ dependencies = [
 
 [dependency-groups]
 dev = [
-    "ipython>=9.10.0",
-    "marimo>=0.19.7",
     "pytest>=9.0.2",
     "ruff>=0.15.0",
     "scalene>=2.1.3",
