@@ -1,13 +1,11 @@
-import pandas as pd
-from io import StringIO, BytesIO
-import re
-import warnings
+from io import StringIO, BytesIO, TextIOWrapper
 from contextlib import contextmanager
+from itertools import islice
 
 @contextmanager
 def open_input(source, mode='r'):
     """
-    Handles file paths, StringIO, and BytesIO.
+    Handles file paths, StringIO, and Bytes
     Mode 'r' for text, 'rb' for bytes.
     """
     if isinstance(source, (str, bytes)) and not isinstance(source, (StringIO, BytesIO)):
@@ -18,149 +16,99 @@ def open_input(source, mode='r'):
         # If it's already a stream (StringIO or BytesIO), just yield it
         yield source
 
-def parse_log(filename_or_fileobj, is_binary=False):
-    mode = 'rb' if is_binary else 'r'
+def parse_chunk(src, dst, is_binary=False):
+    """Convert a LAMMPS fix ave/chunk output file to CSV.
 
-    with open_input(filename_or_fileobj, mode=mode) as f:
-        raw_data = f.read()
+    src: file name or file object (given to open_input)
+    dst: file object open for text writing
+    """
+    header_done = False
 
-    # If the data is bytes, decode it to a string first
-    if isinstance(raw_data, bytes):
-        content = raw_data.decode('utf-8')
-    else:
-        content = raw_data
+    with open_input(src, mode="rb" if is_binary else "r") as raw:
+        f = TextIOWrapper(raw, encoding="utf-8") if is_binary else raw
+        lines = (s for s in map(str.strip, f) if s)     # skip blank lines
 
-    lines = content.splitlines()
+        for line in lines:
+            if line.startswith("#"):
+                if not header_done and line.startswith("# Chunk "):
+                    cols = line.split()[1:]             # drop the "#" token
+                    dst.write("timestep," + ",".join(cols) + "\n")
+                    header_done = True
+                continue
 
-    # thermo data starts with a line containing "Step"
-    # and ends just before a line containing "Loop"
-    try:
-        log_start_index = next(i for i, line in enumerate(lines) if line.strip().startswith("Step"))
-        log_end_index = next(i for i, line in enumerate(lines) if "Loop" in line)
-    except StopIteration:
-        raise RuntimeError("Could not find Step/Loop markers in the log file")
+            parts = line.split()
+            if len(parts) >= 2 and parts[0].isdigit():
+                if not header_done:
+                    raise ValueError("Data found before header line")
+                prefix = parts[0] + ","
+                n_chunks = int(parts[1])
 
-    thermo_lines = [
-        line
-        for line in lines[log_start_index:log_end_index]
-        if not line.strip().startswith("WARNING:")
-    ]
+                rows = [prefix + ",".join(l.split()) for l in islice(lines, n_chunks)]
+                if len(rows) != n_chunks:
+                    raise ValueError(
+                        f"Truncated block: expected {n_chunks} rows, got {len(rows)}"
+                    )
+                if rows:
+                    dst.write("\n".join(rows) + "\n")
 
-    full_text = "\n".join(thermo_lines)
-    return pd.read_csv(StringIO(full_text), sep=r'\s+')
-
-def parse_chunk(filename_or_fileobj, is_binary=False):
-    mode = 'rb' if is_binary else 'r'
-
-    with open_input(filename_or_fileobj, mode=mode) as f:
-        raw_data = f.read()
-
-    content = raw_data.decode('utf-8') if isinstance(raw_data, bytes) else raw_data
-    lines = [l.strip() for l in content.splitlines() if l.strip() != ""]
-
-    # ---- Extract headers ONCE ----
-    header_line = None
-    for l in lines:
-        if l.startswith("# Chunk "):
-            header_line = l
-            break
-
-    if header_line is None:
+    if not header_done:
         raise ValueError("Could not find header line")
 
-    raw_headers = header_line.split()[1:]
-    cleaned_headers = [re.sub(r"c_|v_|\[|\]", "", h) for h in raw_headers]
+def parse_dump(src, dst, is_binary=False):
+    """Convert a LAMMPS text dump to CSV.
 
-    final_headers = ["timestep"] + cleaned_headers
+    src: file name or file object (given to open_input)
+    dst: file object open for text writing
+    """
+    header_done = False
 
-    all_dfs = []
-    i = 0
-    n_lines = len(lines)
+    with open_input(src, mode="rb" if is_binary else "r") as raw:
+        f = TextIOWrapper(raw, encoding="utf-8") if is_binary else raw
 
-    while i < n_lines:
+        for line in f:
+            if not line.startswith("ITEM: TIMESTEP"):
+                continue
 
-        line = lines[i]
+            prefix = next(f).strip() + ","
+            next(f)                       # ITEM: NUMBER OF ATOMS
+            n_atoms = int(next(f))
+            for _ in islice(f, 4):        # ITEM: BOX BOUNDS + 3 bound lines
+                pass
 
-        # skip comments
-        if line.startswith("#"):
-            i += 1
-            continue
+            atom_header = next(f).split()[2:]   # drop "ITEM: ATOMS"
+            if not header_done:
+                dst.write("timestep," + ",".join(atom_header) + "\n")
+                header_done = True
 
-        parts = line.split()
+            rows = [prefix + ",".join(l.split()) for l in islice(f, n_atoms)]
+            if len(rows) != n_atoms:
+                raise ValueError(f"Truncated frame: expected {n_atoms} atoms, got {len(rows)}")
+            dst.write("\n".join(rows) + "\n")
 
-        # ---- detect timestep line ----
-        if len(parts) >= 2 and parts[0].isdigit():
-            timestep = int(parts[0])
-            n_chunks = int(parts[1])
+    if not header_done:
+        raise ValueError("Could not find header line")
 
-            # ---- read chunk rows ----
-            data_start = i + 1
-            data_end = data_start + n_chunks
+def parse_log(src, dst, is_binary=False):
+    """Write the first thermo block of a LAMMPS log to CSV.
 
-            data_body = "\n".join(lines[data_start:data_end])
+    src: file name or file object (given to open_input)
+    dst: file object open for text writing
+    """
+    started = False
 
-            df = pd.read_csv(
-                StringIO(data_body),
-                sep=r"\s+",
-                names=final_headers[1:]
-            )
+    with open_input(src, mode="rb" if is_binary else "r") as raw:
+        f = TextIOWrapper(raw, encoding="utf-8") if is_binary else raw
 
-            df.insert(0, "timestep", timestep)
+        for line in f:
+            if not started:
+                if not line.lstrip().startswith("Step"):
+                    continue
+                started = True
+            elif "Loop" in line:
+                return                      # end of the thermo block
+            elif line.lstrip().startswith("WARNING:"):
+                continue
 
-            all_dfs.append(df)
+            dst.write(",".join(line.split()) + "\n")
 
-            i = data_end
-        else:
-            i += 1
-
-    return pd.concat(all_dfs, ignore_index=True)
-
-def parse_dump(filename_or_fileobj, is_binary=False):
-    mode = 'rb' if is_binary else 'r'
-
-    with open_input(filename_or_fileobj, mode=mode) as f:
-        raw_data = f.read()
-
-    if isinstance(raw_data, bytes):
-        content = raw_data.decode('utf-8')
-    else:
-        content = raw_data
-
-    # setup iterator for processing
-    lines = content.splitlines()
-    line_iter = iter(lines)
-    all_data = []
-    headers = None
-
-    # process blocks
-    for line in line_iter:
-        line = line.strip()
-
-        if line == "ITEM: TIMESTEP":
-            timestep = int(next(line_iter).strip())
-
-            # skip ITEM: NUMBER OF ATOMS + read count
-            next(line_iter)
-            num_atoms = int(next(line_iter).strip())
-
-            # skip ITEM: BOX BOUNDS (4 lines)
-            for _ in range(4): next(line_iter)
-
-            # parse ITEM: ATOMS header
-            atom_header_line = next(line_iter)
-            if headers is None:
-                headers = ["timestep"] + atom_header_line.split()[2:]
-
-            # read N atoms
-            for _ in range(num_atoms):
-                atom_data = next(line_iter).split()
-                # convert to numeric immediately to prevent Object dtypes
-                all_data.append([timestep] + [float(x) for x in atom_data])
-
-    df = pd.DataFrame(all_data, columns=headers)
-
-    # recast columns to integer
-    potential_ints = ['timestep', 'id', 'type']
-    cast_map = {col: int for col in potential_ints if col in df.columns}
-
-    return df.astype(cast_map)
+    raise RuntimeError("Could not find Step/Loop markers in the log file")

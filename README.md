@@ -1,6 +1,6 @@
 # parsermouth
 
-A parser collection to convert LAMMPS output data to a dataframe.
+A parser collection to convert LAMMPS output data to csv.
 
 Currently it implements:
 - dump files
